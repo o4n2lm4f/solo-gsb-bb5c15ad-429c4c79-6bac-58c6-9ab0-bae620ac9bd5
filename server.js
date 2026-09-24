@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const { imposePdf, parseMaxSheetsPerSignature } = require('./lib/impose');
+const { reprintPdf, ReprintInputError } = require('./lib/reprint');
 const { preflightPdf } = require('./lib/preflight');
 const {
   preflightPdfBatch,
@@ -217,6 +218,58 @@ app.post('/api/impose', upload.single('pdf'), async (req, res) => {
     if (err && err.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ error: `文件超过大小限制（${MAX_FILE_SIZE / 1024 / 1024}MB）` });
     }
+    return res.status(422).json({ error: `无法处理该 PDF：${message}` });
+  }
+});
+
+// 缺页补印接口：上传原 PDF + 受损页码表达式（字段 pages，如 "2,5-7"），
+// 按与 /api/impose 相同的拼版选项复用拼版方案，定位受损页所在印张后
+// 成对抽取正背面生成补印 PDF；补印明细通过响应头 X-Reprint-Plan 回传。
+// 空输入、格式错误、越界页码等输入问题返回 400；损坏/加密 PDF 返回 422。
+app.post('/api/reprint', upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return missingFileResponse(res);
+    }
+    if (!looksLikePdf(req.file)) {
+      return res.status(400).json({ error: '仅支持 PDF 文件' });
+    }
+
+    // 拼版选项与 /api/impose 完全一致：分册签帖 + 印张定位标记
+    const options = {};
+    if (req.body && req.body.signatureMode === 'on') {
+      try {
+        options.maxSheetsPerSignature =
+          parseMaxSheetsPerSignature(req.body.maxSheetsPerSignature);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+    }
+    if (req.body && req.body.registrationMarks === 'on') {
+      options.registrationMarks = true;
+    }
+
+    const { pdfBytes, reprint } = await reprintPdf(
+      req.file.buffer,
+      options,
+      req.body ? req.body.pages : undefined,
+    );
+
+    // 补印明细为纯 ASCII JSON，放入自定义响应头供前端渲染命中列表
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="booklet-reprint.pdf"');
+    res.setHeader('X-Reprint-Plan', encodeURIComponent(JSON.stringify(reprint)));
+    res.setHeader('Access-Control-Expose-Headers', 'X-Reprint-Plan');
+    return res.end(Buffer.from(pdfBytes));
+  } catch (err) {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: `文件超过大小限制（${MAX_FILE_SIZE / 1024 / 1024}MB）` });
+    }
+    // 空输入、格式错误、越界页码：明确的输入错误，返回 400
+    if (err instanceof ReprintInputError) {
+      return res.status(400).json({ error: err.message });
+    }
+    const message = err && err.message ? err.message : '补印失败';
     return res.status(422).json({ error: `无法处理该 PDF：${message}` });
   }
 });

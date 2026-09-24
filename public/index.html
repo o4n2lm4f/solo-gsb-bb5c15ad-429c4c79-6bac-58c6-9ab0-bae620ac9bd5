@@ -292,6 +292,23 @@
         <div id="cutting-result" class="cutting-result" hidden></div>
       </div>
 
+      <div id="reprint-box" class="reprint-box" hidden>
+        <div class="reprint-head">
+          <h3>缺页补印</h3>
+          <div class="reprint-head-actions">
+            <button id="reprint-btn" class="btn small secondary" type="button">生成补印 PDF</button>
+            <button id="reprint-download-btn" class="btn small success" type="button" disabled>下载补印 PDF</button>
+          </div>
+        </div>
+        <label class="reprint-pages-field">
+          <span>受损原稿页码：</span>
+          <input type="text" id="reprint-pages" placeholder="如 2,5-7" />
+          <span class="option-hint">单个页码或区间，逗号分隔；同一印张命中多页只补印一次，按原印张顺序正背成对输出，保留原印张尺寸与定位标记</span>
+        </label>
+        <p id="reprint-status" class="status" role="status"></p>
+        <div id="reprint-result" class="reprint-result" hidden></div>
+      </div>
+
       <button id="download-btn" class="btn success">下载拼版 PDF</button>
     </section>
 

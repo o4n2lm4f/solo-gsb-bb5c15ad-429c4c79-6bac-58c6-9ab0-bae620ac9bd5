@@ -755,10 +755,206 @@ function jsonRequest(server, urlPath, payload) {
     assert.ok(Math.abs(plainQuote.layout.sheet.widthMm - 420) < 0.05);
     assert.ok(Math.abs(plainQuote.layout.sheet.heightMm - 297) < 0.05);
 
+    // ---------- 缺页补印 /api/reprint ----------
+    // 5 页文档 -> 补 3 白 -> 2 张纸：第1张 F[空白|1] B[2|空白]，第2张 F[空白|3] B[4|5]
+    const reprintBody = multipartBody({
+      text: { pages: '2,5' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const reprintResp = await request(server, 'POST', '/api/reprint', {
+      body: reprintBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': reprintBody.length,
+      },
+    });
+    assert.strictEqual(reprintResp.status, 200);
+    assert.ok(reprintResp.headers['content-type'].includes('application/pdf'));
+    assert.ok(reprintResp.headers['x-reprint-plan']);
+    const reprintPlan = JSON.parse(decodeURIComponent(reprintResp.headers['x-reprint-plan']));
+    assert.strictEqual(reprintPlan.kind, 'reprint-plan');
+    assert.deepStrictEqual(reprintPlan.pages, [2, 5]);
+    assert.strictEqual(reprintPlan.sheetCount, 2);
+    assert.strictEqual(reprintPlan.pageCount, 4);
+    assert.strictEqual(reprintPlan.signatureMode, false);
+    assert.deepStrictEqual(reprintPlan.sheets.map((s) => s.sheet), [1, 2]);
+    assert.deepStrictEqual(reprintPlan.sheets[0].hitPages, [2]);
+    assert.deepStrictEqual(reprintPlan.sheets[1].hitPages, [5]);
+    const reprintPdfDoc = await PDFDocument.load(reprintResp.body);
+    assert.strictEqual(reprintPdfDoc.getPageCount(), 4, '2 张补印纸 -> 4 个输出页');
+    // 保留原印张尺寸（未启用定位标记：2 × 面板宽 × 面板高）
+    assert.ok(Math.abs(reprintPdfDoc.getPage(0).getWidth() - 595.28 * 2) < 0.5);
+    assert.ok(Math.abs(reprintPdfDoc.getPage(0).getHeight() - 841.89) < 0.5);
+
+    // 同一印张命中多页只补印一次：第 1、2 页同在第 1 张纸
+    const sameSheetBody = multipartBody({
+      text: { pages: '1,2' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const sameSheetResp = await request(server, 'POST', '/api/reprint', {
+      body: sameSheetBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': sameSheetBody.length,
+      },
+    });
+    assert.strictEqual(sameSheetResp.status, 200);
+    const sameSheetPlan = JSON.parse(decodeURIComponent(sameSheetResp.headers['x-reprint-plan']));
+    assert.strictEqual(sameSheetPlan.sheetCount, 1, '同一印张命中多页只补印一次');
+    assert.deepStrictEqual(sameSheetPlan.sheets[0].hitPages, [1, 2]);
+    assert.strictEqual((await PDFDocument.load(sameSheetResp.body)).getPageCount(), 2);
+
+    // 分册签帖：每帖 1 张（容量 4 页）-> 第1帖页 1-4（输出页 1-2）、第2帖页 5（输出页 3-4）
+    const sigReprintBody = multipartBody({
+      text: { pages: '5', signatureMode: 'on', maxSheetsPerSignature: '1' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const sigReprintResp = await request(server, 'POST', '/api/reprint', {
+      body: sigReprintBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': sigReprintBody.length,
+      },
+    });
+    assert.strictEqual(sigReprintResp.status, 200);
+    const sigReprintPlan = JSON.parse(decodeURIComponent(sigReprintResp.headers['x-reprint-plan']));
+    assert.strictEqual(sigReprintPlan.signatureMode, true);
+    assert.strictEqual(sigReprintPlan.sheetCount, 1);
+    assert.strictEqual(sigReprintPlan.sheets[0].signature, 2);
+    assert.strictEqual(sigReprintPlan.sheets[0].sheet, 1);
+    assert.deepStrictEqual(sigReprintPlan.sheets[0].hitPages, [5]);
+    assert.deepStrictEqual(sigReprintPlan.sheets[0].outputPages, [3, 4], '累计第 1 帖的输出页偏移');
+    assert.strictEqual((await PDFDocument.load(sigReprintResp.body)).getPageCount(), 2);
+
+    // 启用定位标记：补印印张保留 8mm 空白边距后的尺寸
+    const marksReprintBody = multipartBody({
+      text: { pages: '2', registrationMarks: 'on' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const marksReprintResp = await request(server, 'POST', '/api/reprint', {
+      body: marksReprintBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': marksReprintBody.length,
+      },
+    });
+    assert.strictEqual(marksReprintResp.status, 200);
+    const marksReprintDoc = await PDFDocument.load(marksReprintResp.body);
+    assert.strictEqual(marksReprintDoc.getPageCount(), 2);
+    assert.ok(Math.abs(marksReprintDoc.getPage(0).getWidth() - (595.28 * 2 + 2 * MM8_PT)) < 0.5);
+    assert.ok(Math.abs(marksReprintDoc.getPage(0).getHeight() - (841.89 + 2 * MM8_PT)) < 0.5);
+
+    // 缺少 pages 字段 / 空输入 -> 400
+    const noPagesBody = multipartBody({
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const noPagesResp = await request(server, 'POST', '/api/reprint', {
+      body: noPagesBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': noPagesBody.length,
+      },
+    });
+    assert.strictEqual(noPagesResp.status, 400);
+    assert.match(JSON.parse(noPagesResp.body.toString()).error, /请输入需要补印的原稿页码/);
+
+    const emptyPagesBody = multipartBody({
+      text: { pages: '   ' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const emptyPagesResp = await request(server, 'POST', '/api/reprint', {
+      body: emptyPagesBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': emptyPagesBody.length,
+      },
+    });
+    assert.strictEqual(emptyPagesResp.status, 400);
+    assert.match(JSON.parse(emptyPagesResp.body.toString()).error, /请输入需要补印的原稿页码/);
+
+    // 格式错误 -> 400
+    const badPagesBody = multipartBody({
+      text: { pages: 'abc' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const badPagesResp = await request(server, 'POST', '/api/reprint', {
+      body: badPagesBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': badPagesBody.length,
+      },
+    });
+    assert.strictEqual(badPagesResp.status, 400);
+    assert.match(JSON.parse(badPagesResp.body.toString()).error, /格式错误/);
+
+    // 越界页码（5 页文档）-> 400
+    const outOfRangeBody = multipartBody({
+      text: { pages: '9' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const outOfRangeResp = await request(server, 'POST', '/api/reprint', {
+      body: outOfRangeBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': outOfRangeBody.length,
+      },
+    });
+    assert.strictEqual(outOfRangeResp.status, 400);
+    assert.match(JSON.parse(outOfRangeResp.body.toString()).error, /超出原稿页码范围（1～5）/);
+
+    // 缺少文件 -> 400；非 PDF -> 400；损坏 PDF -> 422
+    const reprintNoFileBody = multipartBody({ text: { pages: '2' } }, boundary);
+    const reprintNoFile = await request(server, 'POST', '/api/reprint', {
+      body: reprintNoFileBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': reprintNoFileBody.length,
+      },
+    });
+    assert.strictEqual(reprintNoFile.status, 400);
+
+    const reprintTxtBody = multipartBody({
+      text: { pages: '2' },
+      files: [{ field: 'pdf', filename: 'a.txt', contentType: 'text/plain', data: Buffer.from('hello') }],
+    }, boundary);
+    const reprintTxt = await request(server, 'POST', '/api/reprint', {
+      body: reprintTxtBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': reprintTxtBody.length,
+      },
+    });
+    assert.strictEqual(reprintTxt.status, 400);
+
+    const reprintGarbageBody = multipartBody({
+      text: { pages: '2' },
+      files: [{ field: 'pdf', filename: 'x.pdf', contentType: 'application/pdf', data: Buffer.from('%PDF-broken') }],
+    }, boundary);
+    const reprintGarbage = await request(server, 'POST', '/api/reprint', {
+      body: reprintGarbageBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': reprintGarbageBody.length,
+      },
+    });
+    assert.strictEqual(reprintGarbage.status, 422);
+
+    // 补印接口不影响拼版接口（再次调用仍 200）
+    const imposeStillOk = await request(server, 'POST', '/api/impose', {
+      body: imposeBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': imposeBody.length,
+      },
+    });
+    assert.strictEqual(imposeStillOk.status, 200);
+
     console.log('✅ HTTP 集成测试通过：preflight 200 返回 JSON（含错误不阻断），缺文件 400，');
     console.log('   非 PDF 400，损坏文件 422；同一份带错误报告的 PDF 仍可成功 /api/impose；');
     console.log('   批量校验 /api/preflight/batch：坏文件不阻断好文件、按代码汇总、缺文件/超 10 个 400、');
     console.log('   交付放行策略（自定义覆盖 200、非法策略 400）与逐文件/整批放行判定');
+    console.log('   缺页补印 /api/reprint：命中定位与成对抽取 200、同张只补一次、分册偏移、');
+    console.log('   定位标记尺寸保留；空输入/格式错误/越界 400，缺文件/非 PDF 400，损坏 422');
   } finally {
     server.close();
   }

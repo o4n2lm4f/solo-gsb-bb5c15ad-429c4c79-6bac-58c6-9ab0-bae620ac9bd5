@@ -923,6 +923,69 @@ main {
 .cut-order-list li { margin: 2px 0; }
 .cut-order-empty { margin: 6px 0 0; color: var(--muted); }
 
+/* ---------- 拼版摘要中的缺页补印 ---------- */
+.reprint-box {
+  margin-top: 14px;
+  border: 1px solid #f2cf9f;
+  border-radius: 10px;
+  background: #fffaf2;
+  padding: 14px 16px;
+}
+.reprint-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.reprint-head h3 { margin: 0; font-size: 16px; }
+.reprint-head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.reprint-head-actions .btn { width: auto; margin-top: 0; }
+.reprint-pages-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.reprint-pages-field input {
+  width: 180px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 14px;
+}
+.reprint-pages-field input.invalid { border-color: var(--danger); background: #fef2f2; }
+.reprint-layout {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.reprint-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.reprint-sheet-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.reprint-sheet-title { font-weight: 700; }
+.reprint-sheet-pages { color: var(--muted); }
+
 /* ---------- 批量印前校验 ---------- */
 .batch-card h2 { margin: 0 0 8px; font-size: 18px; }
 .batch-intro { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
