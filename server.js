@@ -14,6 +14,7 @@ const {
 const { diffPreflightReports } = require('./lib/preflight-diff');
 const { buildPaperQuote } = require('./lib/quote');
 const { buildCuttingPlan } = require('./lib/cutting');
+const { buildReprintPdf, ReprintInputError } = require('./lib/reprint');
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -45,6 +46,23 @@ function looksLikePdf(file) {
 
 function missingFileResponse(res) {
   return res.status(400).json({ error: '请通过字段 pdf 上传一个 PDF 文件' });
+}
+
+/**
+ * 从 multipart 表单读取拼版选项（拼版与缺页补印共用，保证补印复用同一份方案）：
+ *   - signatureMode=on 启用分册签帖，maxSheetsPerSignature 必须为 1～20 整数；
+ *   - registrationMarks=on 启用印张定位标记。
+ * 非法的每帖纸张数会抛出 Error（调用方按 400 处理）。
+ */
+function readImposeOptions(body) {
+  const options = {};
+  if (body && body.signatureMode === 'on') {
+    options.maxSheetsPerSignature = parseMaxSheetsPerSignature(body.maxSheetsPerSignature);
+  }
+  if (body && body.registrationMarks === 'on') {
+    options.registrationMarks = true;
+  }
+  return options;
 }
 
 // 印前校验接口：仅逐页检查并返回 JSON 报告，不生成拼版文件。
@@ -186,21 +204,12 @@ app.post('/api/impose', upload.single('pdf'), async (req, res) => {
       return res.status(400).json({ error: '仅支持 PDF 文件' });
     }
 
-    // 分册签帖模式：signatureMode=on 时启用；maxSheetsPerSignature 必须为 1～20 的整数
-    const options = {};
-    if (req.body && req.body.signatureMode === 'on') {
-      try {
-        options.maxSheetsPerSignature =
-          parseMaxSheetsPerSignature(req.body.maxSheetsPerSignature);
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
-    }
-
-    // 印张定位标记：registrationMarks=on 时版心四周各加 8mm 空白，
-    // 正背两面四角绘制裁切线、中央折线上下端绘制定位线
-    if (req.body && req.body.registrationMarks === 'on') {
-      options.registrationMarks = true;
+    // 拼版选项与缺页补印共用同一解析逻辑，确保补印复用同一份方案
+    let options;
+    try {
+      options = readImposeOptions(req.body);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
     }
 
     const { pdfBytes, plan } = await imposePdf(req.file.buffer, options);
@@ -217,6 +226,52 @@ app.post('/api/impose', upload.single('pdf'), async (req, res) => {
     if (err && err.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ error: `文件超过大小限制（${MAX_FILE_SIZE / 1024 / 1024}MB）` });
     }
+    return res.status(422).json({ error: `无法处理该 PDF：${message}` });
+  }
+});
+
+// 缺页补印：上传原 PDF + 受损原稿页码（pages，如 "2,5-7"）+ 本次拼版选项
+// （signatureMode / maxSheetsPerSignature / registrationMarks，与拼版时一致）。
+// 服务端复用拼版方案：按正背面四个槽位反查受损页所在印张，同一印张命中多页
+// 只补印一次，按原印张顺序成对抽取正背面，保留原版面尺寸与定位标记。
+// 返回补印 PDF，每张补印纸的帖号 / 帖内张号 / 命中页码通过响应头 X-Reprint-Plan 回传。
+// 空输入、格式错误或越界页码返回 400；PDF 损坏/加密返回 422（口径同拼版）。
+app.post('/api/reprint', upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return missingFileResponse(res);
+    }
+    if (!looksLikePdf(req.file)) {
+      return res.status(400).json({ error: '仅支持 PDF 文件' });
+    }
+
+    let options;
+    try {
+      options = readImposeOptions(req.body);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+
+    const { pdfBytes, manifest } = await buildReprintPdf(
+      req.file.buffer,
+      req.body ? req.body.pages : '',
+      options,
+    );
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="booklet-reprint.pdf"');
+    res.setHeader('X-Reprint-Plan', encodeURIComponent(JSON.stringify(manifest)));
+    res.setHeader('Access-Control-Expose-Headers', 'X-Reprint-Plan');
+    return res.end(Buffer.from(pdfBytes));
+  } catch (err) {
+    // 页码输入问题（空/格式错误/越界）属于请求参数错误
+    if (err instanceof ReprintInputError) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: `文件超过大小限制（${MAX_FILE_SIZE / 1024 / 1024}MB）` });
+    }
+    const message = err && err.message ? err.message : '补印失败';
     return res.status(422).json({ error: `无法处理该 PDF：${message}` });
   }
 });

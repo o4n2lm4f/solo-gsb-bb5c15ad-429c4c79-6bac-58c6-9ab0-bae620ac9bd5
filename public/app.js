@@ -76,6 +76,7 @@ function clearResult() {
   signatureSummaryEl.innerHTML = '';
   clearQuote();
   clearCutting();
+  clearReprint();
 }
 
 /**
@@ -458,6 +459,8 @@ function renderSummary(plan) {
     renderSignatureSummary(plan);
   }
   summaryEl.hidden = false;
+  // 每次拼版成功都重置缺页补印区：清空输入与旧补印结果，仅保留空白表单
+  resetReprintForNewPlan();
 }
 
 function renderSignatureSummary(plan) {
@@ -2388,4 +2391,189 @@ batchDownloadBtn.addEventListener('click', () => {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+// ---------- 缺页补印 ----------
+
+const reprintBoxEl = document.getElementById('reprint-box');
+const reprintPagesInput = document.getElementById('reprint-pages');
+const reprintRunBtn = document.getElementById('reprint-run-btn');
+const reprintStatusEl = document.getElementById('reprint-status');
+const reprintResultEl = document.getElementById('reprint-result');
+const reprintDownloadBtn = document.getElementById('reprint-download-btn');
+
+let reprintBlobUrl = null;
+let reprintManifest = null;
+
+const REPRINT_SIDE_LABELS = { front: '正面', back: '背面' };
+const REPRINT_POS_LABELS = { left: '左槽', right: '右槽' };
+
+function setReprintStatus(text, kind) {
+  reprintStatusEl.textContent = text || '';
+  reprintStatusEl.className = kind ? `status ${kind}` : 'status';
+}
+
+/**
+ * 清空上一次补印结果（下载链接、清单与表格），但不隐藏整个补印区。
+ */
+function clearReprintResult() {
+  if (reprintBlobUrl) {
+    URL.revokeObjectURL(reprintBlobUrl);
+    reprintBlobUrl = null;
+  }
+  reprintManifest = null;
+  reprintResultEl.hidden = true;
+  reprintResultEl.innerHTML = '';
+  reprintDownloadBtn.hidden = true;
+  setReprintStatus('', '');
+}
+
+/**
+ * 彻底清空补印区（重新选择文件时随拼版结果一并隐藏）。
+ */
+function clearReprint() {
+  clearReprintResult();
+  reprintPagesInput.value = '';
+  reprintPagesInput.classList.remove('invalid');
+  reprintRunBtn.disabled = false;
+  reprintBoxEl.hidden = true;
+}
+
+/**
+ * 重新拼版成功后：展示空白补印表单并清空旧结果（旧补印 PDF 不再可信）。
+ */
+function resetReprintForNewPlan() {
+  reprintPagesInput.value = '';
+  reprintPagesInput.classList.remove('invalid');
+  reprintRunBtn.disabled = false;
+  clearReprintResult();
+  reprintBoxEl.hidden = false;
+}
+
+reprintPagesInput.addEventListener('input', () => {
+  reprintPagesInput.classList.remove('invalid');
+});
+
+reprintRunBtn.addEventListener('click', async () => {
+  if (!selectedFile || !lastPlan) return;
+
+  const raw = reprintPagesInput.value;
+  if (!raw.trim()) {
+    reprintPagesInput.classList.add('invalid');
+    setReprintStatus('请先输入受损的原稿页码（如 2,5-7），再生成补印 PDF。', 'error');
+    return;
+  }
+
+  reprintRunBtn.disabled = true;
+  clearReprintResult();
+  setReprintStatus('正在复用本次拼版方案生成补印 PDF…', 'info');
+
+  // 拼版选项以当前拼版方案为准回传，确保服务端复用同一份页序方案
+  const form = new FormData();
+  form.append('pdf', selectedFile);
+  form.append('pages', raw);
+  if (lastPlan.signatureMode) {
+    form.append('signatureMode', 'on');
+    form.append('maxSheetsPerSignature', String(lastPlan.maxSheetsPerSignature));
+  }
+  if (lastPlan.marks && lastPlan.marks.enabled) {
+    form.append('registrationMarks', 'on');
+  }
+
+  try {
+    const resp = await fetch('/api/reprint', { method: 'POST', body: form });
+    if (!resp.ok) {
+      let message = `补印失败（HTTP ${resp.status}）`;
+      try {
+        const data = await resp.json();
+        if (data && data.error) message = data.error;
+      } catch (_) { /* 非 JSON 错误响应，使用默认提示 */ }
+      throw new Error(message);
+    }
+
+    const planHeader = resp.headers.get('X-Reprint-Plan');
+    if (!planHeader) throw new Error('响应缺少补印方案');
+    const manifest = JSON.parse(decodeURIComponent(planHeader));
+
+    const blob = await resp.blob();
+    reprintBlobUrl = URL.createObjectURL(blob);
+    reprintManifest = manifest;
+    renderReprintResult(manifest);
+    setReprintStatus(
+      `补印 PDF 已生成：受损原稿 ${manifest.requestedPageCount} 页，`
+      + `命中 ${manifest.selectedSheetCount} 张印张（已按原印张顺序成对抽取正背面）。`,
+      'info',
+    );
+  } catch (err) {
+    reprintPagesInput.classList.add('invalid');
+    setReprintStatus(err.message || '缺页补印失败', 'error');
+  } finally {
+    reprintRunBtn.disabled = false;
+  }
+});
+
+/**
+ * 描述命中页在原拼版纸上的槽位，如「正面左槽、背面右槽」。
+ */
+function formatHitSlots(hitSlots) {
+  return hitSlots
+    .map((h) => `${REPRINT_SIDE_LABELS[h.side] || h.side}${REPRINT_POS_LABELS[h.pos] || h.pos}`)
+    .join('、');
+}
+
+function renderReprintResult(manifest) {
+  reprintResultEl.innerHTML = '';
+
+  const info = document.createElement('p');
+  info.className = 'reprint-layout';
+  const modeText = manifest.signatureMode
+    ? `分册签帖模式（共 ${manifest.signatureCount} 帖）`
+    : '整册模式';
+  const requestedText = manifest.requestedPages.map((p) => `第 ${p} 页`).join('、');
+  info.textContent = `原稿共 ${manifest.sourceCount} 页 · ${modeText}；受损页码：${requestedText}；`
+    + `命中 ${manifest.selectedSheetCount} 张印张，每张纸正面、背面连续两页输出。`;
+  reprintResultEl.appendChild(info);
+
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'table-wrap';
+  const table = document.createElement('table');
+  table.className = 'reprint-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr>'
+    + '<th>补印纸序号</th>'
+    + (manifest.signatureMode ? '<th>帖号</th><th>帖内张号</th>' : '<th>原印张号</th>')
+    + '<th>在原拼版 PDF 中的输出页</th><th>命中槽位</th><th>命中原稿页</th>'
+    + '</tr>';
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  manifest.sheets.forEach((item, i) => {
+    const tr = document.createElement('tr');
+    const locationCells = manifest.signatureMode
+      ? `<td>第 ${item.signature} 帖</td><td>第 ${item.sheetInSignature} 张</td>`
+      : `<td>第 ${item.sheetInSignature} 张</td>`;
+    const pageList = item.hitPages.map((p) => `第 ${p} 页`).join('、');
+    tr.innerHTML = `<td>第 ${i + 1} 张</td>`
+      + locationCells
+      + `<td>第 ${item.frontOutputPage}、${item.backOutputPage} 页（正 / 背）</td>`
+      + `<td class="reprint-slots">${escapeHtml(formatHitSlots(item.hitSlots))}</td>`
+      + `<td class="reprint-pages">${escapeHtml(pageList)}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  reprintResultEl.appendChild(tableWrap);
+
+  reprintResultEl.hidden = false;
+  reprintDownloadBtn.hidden = false;
+}
+
+reprintDownloadBtn.addEventListener('click', () => {
+  if (!reprintBlobUrl) return;
+  const a = document.createElement('a');
+  a.href = reprintBlobUrl;
+  a.download = `${resultBaseName}-缺页补印.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 });
